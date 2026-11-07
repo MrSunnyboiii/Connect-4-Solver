@@ -1,4 +1,4 @@
-# Connect-4-Solver - 
+# Connect-4-Solver
 Implementing a Negamax Algorithm with Various Optimizations to Solve Multi-Dimensional Connect 4 Boards.
 Compiled to WebAssembly for Compatability with User Interface ([Preview](https://mrsunnyboiii.github.io/Connect-4-Solver/)):
 
