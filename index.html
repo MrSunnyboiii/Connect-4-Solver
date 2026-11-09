@@ -5,6 +5,36 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Connect 4</title>
 
+<!--
+    Cross-origin isolation shim: the 7x5 solver is a multithreaded WASM build
+    and needs SharedArrayBuffer, which requires COOP/COEP headers.
+    Script from: https://github.com/gzuidhof/coi-serviceworker
+-->
+<script src="variants/7x5/coi-serviceworker.js"></script>
+
+<!--
+    7x5 solver (c4/ui/artifact/wasm): classic Emscripten build exposing a
+    global `Module`. `locateFile` must be defined before the script loads so
+    solver.data and solver.wasm resolve to the right folder.
+-->
+<script>
+var Module = {
+    locateFile(path, prefix){
+        if(path === "solver.data") return "variants/7x5/wasm/solver.data";
+        return prefix + path;
+    },
+    onRuntimeInitialized(){
+        Module.ready = true;
+        window.dispatchEvent(new Event("solver5x7-ready"));
+    },
+    onAbort(what){
+        Module.loadError = String(what);
+        window.dispatchEvent(new Event("solver5x7-error"));
+    }
+};
+</script>
+<script defer src="variants/7x5/wasm/solver.js"></script>
+
 <style>
 :root{
     --bg:#09090b;
@@ -800,7 +830,6 @@ button:disabled{
 /*
 =========================================
 CONNECT 4
-6 Rows x 7 Columns
 
 0 = Empty
 1 = Red
@@ -812,6 +841,7 @@ This implementation includes:
 - Ghost landing preview
 - Animated falling tokens
 - Win detection
+- Solvers for 7x6 (per-column scores) and 7x5 (async best move) boards
 =========================================
 */
 import createModule from "./Connect-4-Solvers.js";
@@ -824,6 +854,19 @@ let wasmModule = null;
 let solver = null;
 let solverLoaded = false;
 let analyzeEnabled = false;
+
+// ---------- 7x5 solver state (c4/ui/artifact/wasm) ----------
+// This solver runs asynchronously on worker threads and reports results
+// through the "solve_events" BroadcastChannel (see c4/ui/library.js).
+let solver5 = null;          // Module.Solver instance
+let position5 = null;        // Module.Position mirror used for solving
+let solver5Loaded = false;
+let solver5Error = null;     // Load/startup error message, if any
+let syncedMoves5 = [];       // Moves currently applied to position5
+let solveQueue5 = [];        // Pending solve jobs: {movesStr, resolve}
+let activeSolve5 = null;     // Job currently being solved
+let movesLeft5 = null;       // Per-column moves-to-game-end for 7x5 analysis
+let analyze5For = null;      // positionString of the running 7x5 analysis
 
 // Current board dimensions
 let rows = 6;
@@ -862,6 +905,7 @@ function initBoard(){
 
     document.querySelector("#historyTable tbody").innerHTML = "";
 
+    cancelSolves5();
     updateTurn();
     renderBoard();
     initializeSolver();
@@ -871,8 +915,12 @@ function initBoard(){
     maybePlayAI();
 }
 
+function is7x6(){ return rows === 6 && cols === 7; }
+function is7x5(){ return rows === 5 && cols === 7; }
+function solverSupported(){ return is7x6() || is7x5(); }
+
 async function initializeSolver(){
-    if(rows !== 6 || cols !== 7){
+    if(!is7x6()){
         solver = null;
         solverLoaded = false;
         return;
@@ -885,6 +933,184 @@ async function initializeSolver(){
     solverLoaded = true;
 
     updateAnalysis();
+}
+
+// ---------- 7x5 solver ----------
+
+function initializeSolver5(){
+    if(solver5Loaded || !window.Module?.ready) return;
+
+    solver5 = new Module.Solver();
+    position5 = new Module.Position();
+    solver5Loaded = true;
+
+    updateAnalysis();
+    maybePlayAI();
+}
+
+if(window.Module?.ready) initializeSolver5();
+else window.addEventListener("solver5x7-ready", initializeSolver5);
+
+window.addEventListener("solver5x7-error", () => {
+    solver5Error = `7x5 solver failed to load: ${window.Module?.loadError ?? "unknown error"}`;
+    updateAnalysis();
+});
+
+// The multithreaded 7x5 solver needs SharedArrayBuffer. If coi-serviceworker
+// could not enable cross-origin isolation (e.g. the page was opened from
+// file:// or the service worker was blocked), say so instead of failing
+// silently.
+window.addEventListener("load", () => {
+    setTimeout(() => {
+        if(!solver5Loaded && !solver5Error && !window.crossOriginIsolated){
+            solver5Error =
+                "7x5 solver unavailable: page is not cross-origin isolated. " +
+                "Serve this folder over HTTP (e.g. python3 serve.py) and reload.";
+            updateAnalysis();
+        }
+    }, 3000);
+});
+
+/*
+All solves go through a queue: the solver handles one position at a time
+and reports results on the BroadcastChannel as
+{type:"solved", score, bestMove, movesLeft}, {type:"won", score} for
+positions that are already over, or {type:"cancelled"}.
+*/
+const solveChannel = new BroadcastChannel("solve_events");
+
+function solvePosition5(movesStr){
+    return new Promise(resolve => {
+        solveQueue5.push({ movesStr, resolve });
+        pumpSolveQueue5();
+    });
+}
+
+function pumpSolveQueue5(){
+    if(activeSolve5 || !solveQueue5.length || !solver5Loaded) return;
+
+    activeSolve5 = solveQueue5.shift();
+
+    // Mirror the requested position into the solver's Position object.
+    while(syncedMoves5.length) position5.unmove(syncedMoves5.pop());
+
+    for(const ch of activeSolve5.movesStr){
+        const col = Number(ch);
+        position5.move(col);
+        syncedMoves5.push(col);
+    }
+
+    Module.solve_async(solver5, position5);
+}
+
+solveChannel.onmessage = (event) => {
+    const job = activeSolve5;
+    activeSolve5 = null;
+
+    if(job) job.resolve(event.data);
+
+    pumpSolveQueue5();
+};
+
+// Drop all pending work; called whenever the game position changes.
+function cancelSolves5(){
+    solveQueue5.forEach(job => job.resolve({ type: "cancelled" }));
+    solveQueue5 = [];
+
+    if(activeSolve5 && solver5) solver5.cancel();
+}
+
+/*
+The 7x5 solver returns a single score per solve (unlike the 7x6 solver's
+per-column vector), so analysis solves each playable child position and
+negates the result back to the current player's perspective. Scores land
+in `cachedScores` with the same convention as the 7x6 strip: positive =
+current player wins (bigger = sooner), 0 = draw, negative = loses,
+-100 = full column — so the score strip and heatmap render identically.
+*/
+async function analyze5(){
+    const base = positionString;
+
+    if(analyze5For === base) return; // Already analyzing this position.
+    analyze5For = base;
+
+    const scores = Array(cols).fill(null);
+    const movesVia = Array(cols).fill(null);
+
+    cachedScores = scores;
+    movesLeft5 = movesVia;
+
+    analysisText.textContent = "Solving...";
+    renderScoreStrip();
+
+    for(let c = 0; c < cols; c++){
+        if(lowestRow(c) === -1){
+            scores[c] = -100; // Full column.
+            continue;
+        }
+
+        const data = await solvePosition5(base + c);
+
+        // Abort if the game moved on while this column was solving.
+        const stale =
+            data.type === "cancelled" ||
+            positionString !== base ||
+            !analyzeEnabled ||
+            !is7x5();
+
+        if(stale){
+            if(analyze5For === base) analyze5For = null;
+            return;
+        }
+
+        // Child scores are from the opponent's perspective: negate.
+        scores[c] = -data.score;
+        movesVia[c] = data.type === "won" ? 1 : data.movesLeft + 1;
+
+        renderScoreStrip();
+
+        const cell = boardElement.children[lowestRow(c) * cols + c];
+        if(cell) applyHeat(cell, scores[c]);
+    }
+
+    analyze5For = null;
+
+    let best = -Infinity;
+    let bestCol = -1;
+
+    for(let c = 0; c < cols; c++){
+        if(scores[c] !== -100 && scores[c] > best){
+            best = scores[c];
+            bestCol = c;
+        }
+    }
+
+    if(bestCol === -1) return;
+
+    analysisText.textContent = scoreToText5(best, movesVia[bestCol]);
+    renderScoreStrip();
+}
+
+function scoreToText5(score, movesVia){
+    const player = currentPlayer === 1 ? "Red" : "Yellow";
+
+    if(score === 0) return `${player} can Draw`;
+
+    const result = score > 0 ? "Wins" : "Loses";
+
+    return `${player} ${result} in ${movesVia} Move${movesVia === 1 ? "" : "s"}`;
+}
+
+// The AI plays the solver's best move once the async solve resolves.
+async function playAI5(){
+    const base = positionString;
+    const data = await solvePosition5(base);
+
+    if(data.type !== "solved") return;
+    if(positionString !== base || !is7x5() || gameOver) return;
+    if(aiMode === 0 || currentPlayer !== aiMode) return;
+
+    dropPiece(data.bestMove);
 }
 
 function resizeBoard(){
@@ -947,10 +1173,13 @@ function renderBoard(){
             }
         }
     }
+
+    // Since cachedScores now also carries 7x5 analysis results, the heat
+    // loop above covers both solvers.
 }
 
 function applyHeat(cell, score){
-    if(score === -100) return;
+    if(score == null || score === -100) return;
 
     cell.style.boxShadow = `0 0 20px ${scoreColor(score)}`;
     cell.style.borderColor = scoreColor(score);
@@ -972,6 +1201,8 @@ function dropPiece(col){
 
     const row = lowestRow(col);
     if(row === -1) return; // Full column
+
+    cancelSolves5();
 
     board[row][col] = currentPlayer;
     positionString += col.toString();
@@ -1156,6 +1387,34 @@ function scoreToText(score){
 }
 
 function updateAnalysis(){
+    if(is7x5()){
+        if(!solver5Loaded){
+            cachedScores = null;
+            renderScoreStrip();
+            analysisText.textContent = solver5Error ?? "Loading 7x5 solver...";
+            return;
+        }
+
+        if(gameOver || !analyzeEnabled){
+            cachedScores = null;
+            renderScoreStrip();
+            analysisText.textContent = "";
+            return;
+        }
+
+        // Skip analysis while the AI is about to move; the position is
+        // analyzed again right after its move.
+        if(aiMode !== 0 && currentPlayer === aiMode){
+            cachedScores = null;
+            renderScoreStrip();
+            analysisText.textContent = "Solving...";
+            return;
+        }
+
+        analyze5();
+        return;
+    }
+
     if(!solverLoaded){
         cachedScores = null;
         analysisText.textContent = "";
@@ -1169,27 +1428,31 @@ function updateAnalysis(){
 
     updateSolverScores();
 
-    if(analyzeEnabled) renderBoard();
+    if(analyzeEnabled) {
 
-    renderScoreStrip();
+        renderScoreStrip();
 
-    let best = -Infinity;
+        let best = -Infinity;
 
-    for(let i = 0; i < cachedScores.length; i++){
-        best = Math.max(best, cachedScores[i]);
+        for(let i = 0; i < cachedScores.length; i++){
+            best = Math.max(best, cachedScores[i]);
+        }
+        analysisText.textContent = scoreToText(best);
+    } else {
+        renderScoreStrip();
+        analysisText.textContent = "";
     }
-
-    analysisText.textContent = scoreToText(best);
+    renderBoard();
 }
 
 const aiButton = document.getElementById("aiToggle");
 const aiOptions = Array.from(aiButton.querySelectorAll(".ai-option"));
 
 function updateAIButton(){
-    if(rows !== 6 || cols !== 7){
+    if(!solverSupported()){
         aiButton.setAttribute("aria-disabled", "true");
         aiButton.disabled = true;
-        aiButton.title = "AI only supports 7 × 6 boards.";
+        aiButton.title = "AI only supports 7 × 6 and 7 × 5 boards.";
 
         aiOptions.forEach(option => {
             option.disabled = true;
@@ -1218,10 +1481,10 @@ function updateAIButton(){
 const analyzeButton = document.getElementById("analyzeToggle");
 
 function updateAnalyzeButton(){
-    if(rows !== 6 || cols !== 7){
+    if(!solverSupported()){
         analyzeButton.disabled = true;
         analyzeEnabled = false;
-        analyzeButton.title = "Analysis only supports 7 × 6 boards.";
+        analyzeButton.title = "Analysis only supports 7 × 6 and 7 × 5 boards.";
 
         updateAnalysis();
         return;
@@ -1234,7 +1497,7 @@ function updateAnalyzeButton(){
 aiButton.addEventListener("click", (event) => {
     const option = event.target.closest(".ai-option");
 
-    if(!option || rows !== 6 || cols !== 7) return;
+    if(!option || !solverSupported()) return;
 
     aiMode = Number(option.dataset.mode);
     updateAIButton();
@@ -1243,6 +1506,14 @@ aiButton.addEventListener("click", (event) => {
 function maybePlayAI(){
     if(aiMode === 0) return;
     if(currentPlayer !== aiMode) return;
+    if(gameOver) return;
+
+    // The 7x5 solver is async: the move is played when the result arrives.
+    if(is7x5()){
+        if(solver5Loaded) playAI5();
+        return;
+    }
+
     if(!solverLoaded) return;
 
     updateSolverScores();
@@ -1274,14 +1545,21 @@ function renderScoreStrip(){
 
     if(!analyzeEnabled || !cachedScores) return;
 
-    const best = Math.max(...cachedScores);
+    // null entries are columns the 7x5 analysis has not solved yet.
+    const resolved = cachedScores.filter(v => v !== null);
+    const best = resolved.length ? Math.max(...resolved) : null;
 
     cachedScores.forEach(score => {
         const div = document.createElement("div");
 
-        div.className = score === best ? "score-value best" : "score-value";
-        div.textContent = score === -100 ? "X" : score;
-        div.style.color = scoreColor(score);
+        if(score === null){
+            div.className = "score-value";
+            div.textContent = "…";
+        }else{
+            div.className = score === best ? "score-value best" : "score-value";
+            div.textContent = score === -100 ? "X" : score;
+            div.style.color = scoreColor(score);
+        }
 
         strip.appendChild(div);
     });
@@ -1338,6 +1616,8 @@ document.querySelector("#historyTable tbody").addEventListener("click", (e) => {
     const state = history[index];
 
     historyIndex = index;
+
+    cancelSolves5();
 
     board = state.board.map(r => [...r]);
     positionString = state.positionString;
