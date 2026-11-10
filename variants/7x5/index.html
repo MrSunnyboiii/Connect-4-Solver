@@ -4,28 +4,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    
+
     <title>Connect 4 Solver</title>
 
     <!--
         Work around for GitHub pages not supporting COOP & COEP headers.
+        The service worker lives at the Pages project root so every page
+        under the project shares one cross-origin isolation scope.
         Script from: https://github.com/gzuidhof/coi-serviceworker
-        Feature request to properly fix this: https://github.com/orgs/community/discussions/13309
     -->
-    <script src="coi-serviceworker.js"></script>
+    <script src="../../coi-serviceworker.js"></script>
 
-    <script>
-    var Module = {
-        locateFile(path, prefix) {
-        if (path === "solver.data") {
-            return new URL("./wasm/solver.data", document.baseURI).href;
-        }
-        return prefix + path;
-        }
-    };
-    </script>
-    <script defer src="wasm/solver.js"></script>
-
+    <!--
+        7x5 solver built from https://github.com/ChristopheSteininger/c4.
+        The build is modularized: wasm/solver.js defines the createSolver7x5
+        factory which ui.js calls. No opening book (solver.data) is needed.
+    -->
     <script defer src="wasm/solver.js"></script>
     <script defer src="ui.js"></script>
 

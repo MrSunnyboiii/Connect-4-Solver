@@ -1,8 +1,11 @@
-const width = 7;
-const height = 5;
+// Board dimensions are read from the WASM module once it loads.
+let width = 0;
+let height = 0;
+
+// The module instance created by the `createSolverModule` factory in wasm/solver.js.
+let Module = null;
 
 const moves = [];
-const bc = new BroadcastChannel("solve_events");
 
 const modeElem = document.getElementById("mode");
 const boardElem = document.getElementById("board");
@@ -20,8 +23,17 @@ var scheduleSolve = false;
 // Time when the last solve was kicked off.
 var solveStartTimeMs;
 
-// Wait for the WebAssembly module to load
-Module.onRuntimeInitialized = () => {
+// Wait for the WebAssembly module to load. The build is modularized, so
+// wasm/solver.js defines a factory instead of starting automatically.
+createSolver7x5({
+    onAbort: (error) => {
+        boardElem.innerText = `Error loading WebAssembly: ${error}`;
+    },
+}).then((module) => {
+    Module = module;
+    width = Module.BOARD_WIDTH;
+    height = Module.BOARD_HEIGHT;
+
     const position = new Module.Position();
     const solver = new Module.Solver();
 
@@ -37,8 +49,7 @@ Module.onRuntimeInitialized = () => {
     undoElem.addEventListener("click", () => unmove(solver, position));
     resetElem.addEventListener("click", () => reset(solver, position));
 
-    bc.onmessage = (event) => {
-        const data = event.data;
+    Module.onSolverMessage = (data) => {
         const runTimeMs = Math.round(performance.now() - solveStartTimeMs);
         console.log(`Got message ${JSON.stringify(data)} from solver after ${runTimeMs} ms.`);
 
@@ -72,11 +83,7 @@ Module.onRuntimeInitialized = () => {
                 return;
         }
     };
-}
-
-Module.onAbort = (error) => {
-    boardElem.innerText = `Error loading WebAssembly: ${error}`;
-}
+});
 
 function solve(solver, position) {
     // Clear the highlighted column.
