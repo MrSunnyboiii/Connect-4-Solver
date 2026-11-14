@@ -14,7 +14,7 @@ This implementation includes:
 - Win detection
 - Exact solvers (per-column analysis + AI play) for:
     * 7x6 via the Pons-based solver (variants/7x6/wasm/Connect-4-Solvers.js)
-    * every WIDTHxHEIGHT board with >= 4 columns, >= 4 rows, and <= 35
+    * every WIDTHxHEIGHT board with >= 4 columns, >= 4 rows, and < 42
       cells via the c4 engine (variants/<W>x<H>/wasm/solver.js), built from
       https://github.com/ChristopheSteininger/c4
 =========================================
@@ -64,15 +64,17 @@ demand the first time their size is selected.
 =========================================
 */
 
-// Every rectangular board with >= 4 columns, >= 4 rows, and <= 35 cells,
+// Every rectangular board with >= 4 columns, >= 4 rows, and < 42 cells,
 // in both orientations where both qualify (gravity makes them different
 // games). Keys and directories are WIDTHxHEIGHT.
 const C4_SIZES = [
-    "4x4", "5x4", "6x4", "7x4", "8x4",
-    "4x5", "5x5", "6x5", "7x5",
-    "4x6", "5x6",
+    "4x4", "5x4", "6x4", "7x4", "8x4", "9x4", "10x4",
+    "4x5", "5x5", "6x5", "7x5", "8x5",
+    "4x6", "5x6", "6x6",
     "4x7", "5x7",
-    "4x8",
+    "4x8", "5x8",
+    "4x9",
+    "4x10",
 ];
 
 const SOLVER_REGISTRY = new Map();

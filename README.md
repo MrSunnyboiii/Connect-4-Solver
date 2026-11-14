@@ -11,22 +11,27 @@ The homepage offers local two-player play on any board from 4×4 to 10×10.
 Exact solving (AI play + per-column analysis) is available for:
 
 * **7×6** — the original solver (Pascal Pons design) with its opening book.
-* **Every rectangular board with ≥ 4 columns, ≥ 4 rows, and ≤ 35 cells**,
+* **Every rectangular board with ≥ 4 columns, ≥ 4 rows, and fewer than 42 cells**,
   solved by [c4](https://github.com/ChristopheSteininger/c4)
   (built from the fork [MrSunnyboiii/c4](https://github.com/MrSunnyboiii/c4)):
 
   | Height (rows) | Widths (columns) |
   |---------------|------------------|
-  | 4             | 4, 5, 6, 7, 8    |
-  | 5             | 4, 5, 6, 7       |
-  | 6             | 4, 5             |
+  | 4             | 4, 5, 6, 7, 8, 9, 10 |
+  | 5             | 4, 5, 6, 7, 8    |
+  | 6             | 4, 5, 6          |
   | 7             | 4, 5             |
-  | 8             | 4                |
+  | 8             | 4, 5             |
+  | 9             | 4                |
+  | 10            | 4                |
 
-  That is 14 variants. Both orientations are built where both qualify
-  (e.g. 4×8 and 8×4) because gravity makes them different games. All 14
+  That is 21 variants. Both orientations are built where both qualify
+  (e.g. 5×8 and 8×5) because gravity makes them different games. All 21
   builds are strong solvers (they report the move the game ends on) and
   ship **without** opening books — no `solver.data` file is requested.
+  Larger positions can take considerably longer to solve in a browser.
+  In a local test, empty-board analysis for 9×4, 10×4 and 8×5 each
+  exceeded 15 seconds; timing depends on the device and position.
 
 ## Layout
 
@@ -50,10 +55,10 @@ provides the COOP/COEP headers GitHub Pages cannot send.
 
 ## Reproducing the c4 WASM builds
 
-The 14 `variants/<width>x<height>/wasm/` folders are built from the
+The 21 `variants/<width>x<height>/wasm/` folders are built from the
 [MrSunnyboiii/c4](https://github.com/MrSunnyboiii/c4) fork of
-[ChristopheSteininger/c4](https://github.com/ChristopheSteininger/c4)
-(branch `multi-size-wasm-variants` until merged). With an activated
+[ChristopheSteininger/c4](https://github.com/ChristopheSteininger/c4).
+With an activated
 [emsdk](https://github.com/emscripten-core/emsdk):
 
 ```sh
@@ -80,8 +85,8 @@ To rebuild a single size:
 ## Adding a board size
 
 1. Add the size to `ALL_SIZES` in `scripts/build-wasm-variants.sh` (c4 repo)
-   and run the script — note the ≤ 35 cell limit is a practical solve-time
-   limit, not an engine limit; bigger boards solve slowly in the browser.
+   and run the script — note the fewer-than-42-cell limit is a practical
+   solve-time limit, not an engine limit; bigger boards solve slowly in the browser.
 2. Copy the generated `<width>x<height>/wasm/` folder into `variants/`.
 3. Add the size to `C4_SIZES` in `app.js`. The registry, loader, AI, and
    analysis pick it up automatically.
